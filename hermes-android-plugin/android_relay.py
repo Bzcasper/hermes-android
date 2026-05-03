@@ -266,9 +266,11 @@ async def _serve(state: _RelayState, ready: threading.Event) -> None:
 
 # ── Rate limiting for WebSocket auth ─────────────────────────────────────────
 
-_AUTH_MAX_ATTEMPTS = 5  # max failed attempts before blocking
+# Single-user relay: raise attempt threshold and shorten block window so a
+# reconnect storm (e.g. from a misconfigured app) can never self-lockout.
+_AUTH_MAX_ATTEMPTS = 50   # max failed attempts before blocking
 _AUTH_WINDOW_SECONDS = 60  # sliding window for counting failures
-_AUTH_BLOCK_SECONDS = 300  # how long to block an IP (5 minutes)
+_AUTH_BLOCK_SECONDS = 30   # how long to block an IP (short to avoid self-lockout)
 _AUTH_CLEANUP_INTERVAL = 120  # seconds between cleanup sweeps
 
 # {ip: [timestamp, timestamp, ...]} — tracks failed auth attempt times per IP
@@ -342,8 +344,15 @@ def _auth_record_failure(ip: str) -> None:
 
 
 async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketResponse:
-    # Rate limiting — check before token validation
-    remote_ip = request.remote or "unknown"
+    # Rate limiting — check before token validation.
+    # Behind Render's reverse proxy every request arrives with request.remote
+    # set to 127.0.0.1. Read the real client IP from X-Forwarded-For so the
+    # rate-limiter tracks actual callers instead of locking out everyone.
+    remote_ip = (
+        request.headers.get("X-Forwarded-For", request.remote or "unknown")
+        .split(",")[0]
+        .strip()
+    )
     if _auth_is_blocked(remote_ip):
         logger.warning("Auth attempt from blocked IP %s — returning 429", remote_ip)
         raise web.HTTPTooManyRequests(
@@ -370,7 +379,7 @@ async def _handle_ws(request: web.Request, state: _RelayState) -> web.WebSocketR
             )
         state.phone_ws = ws
 
-    logger.info("Phone connected from %s", request.remote)
+    logger.info("Phone connected from %s", remote_ip)
 
     try:
         async for msg in ws:
