@@ -30,3 +30,5 @@ hermes-android-bridge/local.properties
 # Environment
 .env
 *.env.local
+.env*
+.env.*
